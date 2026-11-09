@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push: {branches: [main]}
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: thermaledger
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+
+    env:
+      # Note the role: NOT postgres. The isolation suite is meaningless when run
+      # as a superuser, because Postgres exempts superusers from RLS. The suite
+      # asserts this itself and would fail the build if CI got it wrong.
+      DATABASE_URL: postgres://thermaledger_app:thermaledger@localhost:5432/thermaledger
+      DJANGO_SECRET_KEY: ci-only-key
+      DJANGO_SETTINGS_MODULE: config.settings
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Create the non-superuser application role
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE thermaledger_app WITH LOGIN PASSWORD 'thermaledger' NOSUPERUSER NOBYPASSRLS;"
+          PGPASSWORD=postgres psql -h localhost -U postgres -d thermaledger -v ON_ERROR_STOP=1 \
+            -c "GRANT ALL ON SCHEMA public TO thermaledger_app; ALTER SCHEMA public OWNER TO thermaledger_app;"
+          PGPASSWORD=postgres psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER ROLE thermaledger_app CREATEDB;"  # pytest creates test_thermaledger
+
+      - run: pip install -r requirements.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Migrations are complete and committed
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Test suite
+        run: pytest -v
+
+      - name: Tenant isolation suite, reported on its own
+        run: pytest -m isolation -v
+
+      - name: Every tenant table is actually protected
+        run: |
+          python manage.py migrate
+          python manage.py enable_rls --check
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend

@@ -1,0 +1,55 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: thermaledger
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs once, on first boot, to create the non-superuser app role.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d thermaledger"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  broker:
+    image: eclipse-mosquitto:2
+    ports: ["1883:1883"]
+    volumes:
+      - ./docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  web:
+    build: .
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py enable_rls &&
+             python manage.py runserver 0.0.0.0:8000"
+    environment:
+      DATABASE_URL: postgres://thermaledger_app:thermaledger@db:5432/thermaledger
+      DJANGO_DEBUG: "1"
+      DJANGO_SECRET_KEY: dev-only-insecure-key
+      MQTT_HOST: broker
+      CORS_ALLOWED_ORIGINS: http://localhost:5173
+    volumes: [".:/app"]
+    ports: ["8000:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+
+  ingest:
+    build: .
+    command: python manage.py ingest_mqtt
+    environment:
+      DATABASE_URL: postgres://thermaledger_app:thermaledger@db:5432/thermaledger
+      DJANGO_SECRET_KEY: dev-only-insecure-key
+      MQTT_HOST: broker
+    volumes: [".:/app"]
+    depends_on:
+      db: {condition: service_healthy}
+      broker: {condition: service_started}
+
+volumes:
+  pgdata:

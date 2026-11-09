@@ -1,0 +1,67 @@
+# Render blueprint. `New > Blueprint` against this repo creates all three
+# services and wires DATABASE_URL automatically.
+#
+# Everything here is on Render's free tier. The one caveat worth knowing before
+# you demo it: a free web service sleeps after 15 minutes idle and takes 30-50
+# seconds to wake, and a free Postgres instance expires after 30 days. Both are
+# fine for a portfolio link; neither is fine for a customer. See DEPLOY.md.
+
+databases:
+  - name: thermaledger-db
+    databaseName: thermaledger
+    user: thermaledger_app
+    plan: free
+
+services:
+  - type: web
+    name: thermaledger-api
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: "pip install -r requirements.txt && python manage.py collectstatic --noinput"
+    # enable_rls runs on every deploy. It is idempotent, and it aborts the
+    # release if the database role can bypass RLS - which would mean shipping
+    # with tenant isolation silently switched off.
+    preDeployCommand: "python manage.py migrate && python manage.py enable_rls"
+    startCommand: "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 2 --timeout 60"
+    healthCheckPath: /healthz
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: thermaledger-db
+          property: connectionString
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_DEBUG
+        value: "0"
+      - key: DJANGO_ALLOWED_HOSTS
+        value: ".onrender.com"
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+      # Set this to the static site's URL after the first deploy, then redeploy.
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: CSRF_TRUSTED_ORIGINS
+        sync: false
+
+  - type: web
+    name: thermaledger-portal
+    runtime: static
+    rootDir: frontend
+    buildCommand: "npm ci && npm run build"
+    staticPublishPath: dist
+    envVars:
+      # Set this to the API service's URL after the first deploy, then redeploy.
+      - key: VITE_API_BASE
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
